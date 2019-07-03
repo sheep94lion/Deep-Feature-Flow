@@ -6,6 +6,9 @@
 # --------------------------------------------------------
 
 #%%
+cur_path = "/home/yizhao/Code/Deep-Feature-Flow/dff_rfcn/"
+import sys
+sys.path.append(cur_path)
 import _init_paths
 import h5py
 import argparse
@@ -22,7 +25,6 @@ import numpy as np
 os.environ['PYTHONUNBUFFERED'] = '1'
 os.environ['MXNET_CUDNN_AUTOTUNE_DEFAULT'] = '0'
 os.environ['MXNET_ENABLE_GPU_P2P'] = '0'
-cur_path = os.path.abspath(os.path.dirname(__file__))
 update_config(cur_path + '/../experiments/dff_rfcn/cfgs/dff_rfcn_vid_demo.yaml')
 
 sys.path.insert(0, os.path.join(cur_path, '../external/mxnet', config.MXNET_VERSION))
@@ -34,15 +36,6 @@ from utils.show_boxes import show_boxes, draw_boxes
 from utils.tictoc import tic, toc
 from nms.nms import py_nms_wrapper, cpu_nms_wrapper, gpu_nms_wrapper
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Show Deep Feature Flow demo')
-    args = parser.parse_args()
-    return args
-
-args = parse_args()
-
-print args
-exit(0)
 
 # get symbol
 pprint.pprint(config)
@@ -56,6 +49,14 @@ model = '/../model/rfcn_dff_flownet_vid'
 sym_instance = eval(config.symbol + '.' + config.symbol)()
 key_sym = sym_instance.get_key_test_symbol(config)
 cur_sym = sym_instance.get_cur_test_symbol(config)
+
+cur_sym_flow = sym_instance.get_cur_test_flow_symbol(config)
+cur_sym_prop = sym_instance.get_cur_test_prop_symbol(config)
+cur_sym_rpn = sym_instance.get_cur_test_rpn_symbol(config)
+
+key_sym_feat = sym_instance.get_key_test_feat_symbol(config)
+key_sym_rpn = sym_instance.get_key_test_rpn_symbol(config)
+
 # cur_sym.save("dff_cur_sym2.json")
 # return
 
@@ -76,15 +77,44 @@ classes = ['airplane', 'antelope', 'bear', 'bicycle',
 
 # load demo data
 image_names = sorted(glob.glob(cur_path + '/../demo/ILSVRC2015_val_00007010/*.JPEG'))
-print image_names
+# print image_names
 # return
 output_dir = cur_path + '/../demo/rfcn_dff_cpu/'
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 key_frame_interval = 10
 
-#
+arg_params, aux_params = load_param(cur_path + model, 0, process=True)
 
+# Module
+mod_cur_flow = mx.mod.Module(symbol=cur_sym_flow, context=ctx, data_names=('data', 'data_key'), label_names=None)
+mod_cur_prop = mx.mod.Module(symbol=cur_sym_prop, context=ctx, data_names=('flow', 'scale_map', 'feat_key'), label_names=None)
+mod_cur_rpn = mx.mod.Module(symbol=cur_sym_rpn, context=ctx, data_names=('conv_feat', 'im_info'), label_names=None)
+mod_cur_flow.bind(for_training=False, data_shapes=[('data', (1, 3, 562, 1000)), ('data_key', (1, 3, 562, 1000))])
+# print mod_flow.output_shapes
+mod_cur_prop.bind(for_training=False, data_shapes=[('flow', (1, 2, 36, 63)), ('scale_map', (1, 1024, 36, 63)), ('feat_key', (1, 1024, 36, 63))])
+# print mod_prop.output_shapes
+mod_cur_rpn.bind(for_training=False, data_shapes=[('conv_feat', (1, 1024, 36, 63)), ('im_info', (1, 3))])
+# print mod_rpn.output_shapes
+
+mod_key_feat = mx.mod.Module(symbol=key_sym_feat, context=ctx, data_names=('data',), label_names=None)
+mod_key_rpn = mx.mod.Module(symbol=key_sym_rpn, context=ctx, data_names=('conv_feat', 'im_info'), label_names=None)
+mod_key_feat.bind(for_training=False, data_shapes=[('data', (1, 3, 562, 1000))])
+mod_key_rpn.bind(for_training=False, data_shapes=[('conv_feat', (1, 1024, 36, 63)), ('im_info', (1, 3))])
+
+mod_key = mx.mod.Module(symbol=key_sym, context=ctx, data_names=('data', 'im_info', 'data_key', 'feat_key'), label_names=None)
+mod_key.bind(for_training=False, data_shapes=[('data', (1, 3, 562, 1000)), ('im_info', (1, 3)), ('data_key', (1, 3, 562, 1000)), ('feat_key', (1, 1024, 36, 63))])
+
+mod_cur_flow.set_params(arg_params, aux_params)
+mod_cur_prop.set_params(arg_params, aux_params)
+mod_cur_rpn.set_params(arg_params, aux_params)
+
+mod_key_feat.set_params(arg_params, aux_params)
+mod_key_rpn.set_params(arg_params, aux_params)
+
+mod_key.set_params(arg_params, aux_params)
+
+#%%
 data = []
 key_im_tensor = None
 for idx, im_name in enumerate(image_names):
@@ -95,36 +125,76 @@ for idx, im_name in enumerate(image_names):
     im, im_scale = resize(im, target_size, max_size, stride=config.network.IMAGE_STRIDE)
     im_tensor = transform(im, config.network.PIXEL_MEANS)
     im_info = np.array([[im_tensor.shape[2], im_tensor.shape[3], im_scale]], dtype=np.float32)
-    print(im_info.shape)
-    print im_info
+    # print(im_info.shape)
+    # print im_info
     if idx % key_frame_interval == 0:
         key_im_tensor = im_tensor
-    data.append({'data': im_tensor, 'im_info': im_info, 'data_key': key_im_tensor, 'feat_key': np.zeros((1,config.network.DFF_FEAT_DIM,1,1))})
+    data.append({'data': im_tensor, 'im_info': im_info, 'data_key': key_im_tensor, 'feat_key': np.zeros((1,config.network.DFF_FEAT_DIM,36,63))})
 
 
 # get predictor
-data_names = ['data', 'im_info', 'data_key', 'feat_key']
-label_names = []
-data = [[mx.nd.array(data[i][name]) for name in data_names] for i in xrange(len(data))]
-max_data_shape = [[('data', (1, 3, max([v[0] for v in config.SCALES]), max([v[1] for v in config.SCALES]))),
-                    ('data_key', (1, 3, max([v[0] for v in config.SCALES]), max([v[1] for v in config.SCALES]))),]]
-provide_data = [[(k, v.shape) for k, v in zip(data_names, data[i])] for i in xrange(len(data))]
-provide_label = [None for i in xrange(len(data))]
-arg_params, aux_params = load_param(cur_path + model, 0, process=True)
-key_predictor = Predictor(key_sym, data_names, label_names,
-                        context=[ctx], max_data_shapes=max_data_shape,
-                        provide_data=provide_data, provide_label=provide_label,
-                        arg_params=arg_params, aux_params=aux_params)
-cur_predictor = Predictor(cur_sym, data_names, label_names,
-                        context=[ctx], max_data_shapes=max_data_shape,
-                        provide_data=provide_data, provide_label=provide_label,
-                        arg_params=arg_params, aux_params=aux_params)
+# data_names = ['data', 'im_info', 'data_key', 'feat_key']
+# label_names = []
+# data = [[mx.nd.array(data[i][name]) for name in data_names] for i in xrange(len(data))]
+# max_data_shape = [[('data', (1, 3, max([v[0] for v in config.SCALES]), max([v[1] for v in config.SCALES]))),
+#                     ('data_key', (1, 3, max([v[0] for v in config.SCALES]), max([v[1] for v in config.SCALES]))),]]
+# provide_data = [[(k, v.shape) for k, v in zip(data_names, data[i])] for i in xrange(len(data))]
+# provide_label = [None for i in xrange(len(data))]
+# arg_params, aux_params = load_param(cur_path + model, 0, process=True)
+# key_predictor = Predictor(key_sym, data_names, label_names,
+#                         context=[ctx], max_data_shapes=max_data_shape,
+#                         provide_data=provide_data, provide_label=provide_label,
+#                         arg_params=arg_params, aux_params=aux_params)
+# cur_predictor = Predictor(cur_sym, data_names, label_names,
+#                         context=[ctx], max_data_shapes=max_data_shape,
+#                         provide_data=provide_data, provide_label=provide_label,
+#                         arg_params=arg_params, aux_params=aux_params)
+
 if device_name == 'cpu':
     nms = cpu_nms_wrapper(config.TEST.NMS)
 else:
     nms = gpu_nms_wrapper(config.TEST.NMS, 0)
 
 
+# print data[0]['data'].shape
+
+#%%
+from collections import namedtuple
+BatchKeyFeat = namedtuple('BatchKeyFeat', ['data'])
+BatchKeyRpn = namedtuple('BatchKeyRpn', ['conv_feat', 'im_info'])
+BatchKey = namedtuple('BatchKey', ['data', 'im_info', 'data_key', 'feat_key'])
+time_list_key_feat = []
+time_list_key_rpn = []
+for idx, im_name in enumerate(image_names):
+    if idx > 0:
+        break
+    if idx % key_frame_interval == 0:
+        tic()
+        data_batch_key_feat = mx.io.DataBatch(data=[mx.nd.array(data[idx][data_name]) for data_name in ['data']], provide_data=[mx.io.DataDesc('data', (1, 3, 562, 1000))])
+        mod_key_feat.forward(data_batch_key_feat)
+        conv_feat = mod_key_feat.get_outputs()[0]
+        time_key_feat = toc()
+
+        # print type(conv_feat)
+        # print 'As Parts: conv_feat: ', mod_key_feat.get_outputs()
+        tic()
+        data_batch_key_rpn = mx.io.DataBatch(data=[conv_feat, mx.nd.array(data[idx]['im_info'])], provide_data=[mx.io.DataDesc('conv_feat', (1, 1024, 36, 63)), mx.io.DataDesc('im_info', (1, 3))])
+        mod_key_rpn.forward(data_batch_key_rpn)
+        rois, cls_prob, bbox_pred = mod_key_rpn.get_outputs()
+
+
+        # data_batch_key = mx.io.DataBatch(data=[mx.nd.array(data[idx]['data']), mx.nd.array(data[idx]['im_info']), mx.nd.array(data[idx]['data_key']), mx.nd.array(data[idx]['feat_key'])], label=[], pad=0, index=0,provide_data=[mx.io.DataDesc('data', (1, 3, 562, 1000)), mx.io.DataDesc('im_info', (1, 3)), mx.io.DataDesc('data_key', (1, 3, 562, 1000)), mx.io.DataDesc('feat_key', (1, 1024, 36, 63))])
+        # mod_key.forward(data_batch_key)
+        # print 'As Whole: ', mod_key.get_outputs()
+        # print inter_conv_feat.shape
+        # mod_key_rpn.forward(BatchKeyRpn([inter_conv_feat], [data[idx]['im_info']]))
+        # rois, cls_prob, bbox_pred = mod_key_rpn.get_outputs()
+        # print rois, cls_prob, bbox_pred
+        # mod_key.forward(BatchKey(mx.nd.array([data[idx]['data']]), mx.nd.array([data[idx]['im_info']]), mx.nd.array([data[idx]['data_key']]), mx.nd.array([data[idx]['feat_key']])))
+        # print mod_key.get_outputs()
+# exit(0)
+
+#%%
 # warm up
 for j in xrange(2):
     data_batch = mx.io.DataBatch(data=[data[j]], label=[], pad=0, index=0,

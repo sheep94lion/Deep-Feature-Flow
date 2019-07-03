@@ -40,6 +40,9 @@ class Predictor(object):
         # [dict(zip(self._mod.output_names, _)) for _ in zip(*self._mod.get_outputs(merge_multi_context=False))]
         return [dict(zip(self._mod.output_names, _)) for _ in zip(*self._mod.get_outputs(merge_multi_context=False))]
 
+    def save(self, prefix):
+        self._mod.save(prefix, 1)
+
 
 def im_proposal(predictor, data_batch, data_names, scales):
     output_all = predictor.predict(data_batch)
@@ -129,7 +132,7 @@ def generate_proposals(predictor, test_data, imdb, cfg, vis=False, thresh=0.):
 
 def im_detect(predictor, data_batch, data_names, scales, cfg):
     output_all = predictor.predict(data_batch)
-
+    
     data_dict_all = [dict(zip(data_names, data_batch.data[i])) for i in xrange(len(data_batch.data))]
     scores_all = []
     pred_boxes_all = []

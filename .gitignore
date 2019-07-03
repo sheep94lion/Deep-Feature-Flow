@@ -1,3 +1,11 @@
+# Key frame feature maps
+feat_key*
+
+# Output image results
+rfcn_dff/
+rfcn/
+rfcn_dff_cpu/
+
 # IntelliJ project files
 .idea
 *.iml
